@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -218,6 +218,7 @@ impl attach_hub_server::AttachHub for AttachSvc {
                 listing: Mutex::new(Some(listing)),
                 attempts: 0,
                 queued_at: Instant::now(),
+                enqueued_at: SystemTime::now(),
             };
             tracing::info!(id = job.id, system = job.req.system, "queueing build");
             Metrics::inc(&self.state.metrics.submitted);

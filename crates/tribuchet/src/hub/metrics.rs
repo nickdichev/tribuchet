@@ -374,7 +374,7 @@ pub(super) async fn serve(state: Arc<HubState>, addr: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
 
     use super::*;
     use crate::hub::state::{Job, Replay, Worker, WorkerCaps};
@@ -465,6 +465,7 @@ mod tests {
             listing: Mutex::default(),
             attempts: 0,
             queued_at: Instant::now(),
+            enqueued_at: SystemTime::now(),
         };
         state.queue.lock().await.push_back(job("x86_64-linux"));
         state.queue.lock().await.push_back(job("x86_64-linux"));

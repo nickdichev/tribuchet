@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Mutex, Notify, mpsc};
 use tonic::Status;
@@ -20,6 +20,8 @@ use crate::fsutil::io_ctx;
 
 use crate::proto::{AttachEvent, BuildRequest, attach_event};
 
+#[path = "state/assignments.rs"]
+mod assignments;
 #[path = "state/inflight.rs"]
 mod inflight;
 #[path = "state/replay.rs"]
@@ -27,6 +29,7 @@ mod replay;
 #[path = "state/workers.rs"]
 mod workers;
 
+pub(super) use assignments::{Assigned, Assignment};
 pub(super) use inflight::{Inflight, Listing};
 pub(super) use replay::Replay;
 pub(super) use workers::{Departed, Liveness, Worker};
@@ -59,6 +62,9 @@ pub(super) struct Job {
     pub(super) attempts: u32,
     /// When the job last entered the queue, for the queue-wait histogram.
     pub(super) queued_at: Instant,
+    /// First submit time, kept across requeues: the developer's wait.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) enqueued_at: SystemTime,
 }
 
 impl Job {
@@ -97,6 +103,8 @@ pub(super) struct HubState {
     pub(super) departed: StdMutex<Vec<Departed>>,
     /// worker id -> dedupe keys it can resume
     pub(super) held: StdMutex<HashMap<u64, HashSet<String>>>,
+    /// job id -> the worker running it, for status reporting
+    pub(super) assignments: StdMutex<HashMap<String, Assignment>>,
     /// Woken when worker capabilities change so waiting submissions
     /// re-check servability without polling.
     pub(super) caps_changed: Notify,
@@ -190,6 +198,7 @@ impl HubState {
             started_at: Instant::now(),
             departed: StdMutex::default(),
             held: StdMutex::default(),
+            assignments: StdMutex::default(),
             caps_changed: Notify::default(),
             metrics: Metrics::default(),
             nix_config,
@@ -378,7 +387,7 @@ mod tests {
         }
     }
 
-    fn queued(system: &str, replay: Arc<Replay>) -> Job {
+    pub(super) fn queued(system: &str, replay: Arc<Replay>) -> Job {
         Job {
             id: "j1".into(),
             key: "k1".into(),
@@ -392,6 +401,7 @@ mod tests {
             listing: StdMutex::default(),
             attempts: 0,
             queued_at: Instant::now(),
+            enqueued_at: SystemTime::now(),
         }
     }
 

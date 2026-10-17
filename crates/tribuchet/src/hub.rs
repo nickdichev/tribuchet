@@ -37,7 +37,7 @@ pub use serve::run;
 use crate::errors::{Result, chain};
 use metrics::Metrics;
 use relay::{WorkerSession, run_job, send};
-use state::{HubState, Job, Liveness, Worker, WorkerCaps};
+use state::{Assigned, HubState, Job, Liveness, Worker, WorkerCaps};
 
 /// No worker message for this long tears the session down and fails
 /// its builds: heartbeats flow every 30s, so silence means a dead
@@ -334,10 +334,12 @@ async fn worker_loop(
         state
             .metrics
             .observe_queue(&job.req.system, job.queued_at.elapsed());
+        let assigned = state.assign(&job, worker_id, &register.worker_name);
         let in_rx = router.register(&job.id);
         tokio::spawn(supervise_job(
             state.clone(),
             job,
+            assigned,
             router.clone(),
             out_tx.clone(),
             in_rx,
@@ -356,6 +358,7 @@ async fn worker_loop(
 async fn supervise_job(
     state: Arc<HubState>,
     job: Job,
+    assigned: Assigned,
     router: Router,
     out_tx: mpsc::Sender<Result<HubMessage, Status>>,
     in_rx: mpsc::Receiver<worker_message::Msg>,
@@ -365,6 +368,8 @@ async fn supervise_job(
     let mut dispatched = false;
     let res = run_job(&state, &job, &out_tx, in_rx, sess, &mut dispatched).await;
     router.unregister(&job.id);
+    // Cleared on every outcome, before a requeue can redispatch it.
+    drop(assigned);
     // run_job counts the build verdict. Only session/hub-side errors
     // reach the branches below.
     let Err(err) = res else {
