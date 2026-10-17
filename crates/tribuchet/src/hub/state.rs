@@ -63,7 +63,6 @@ pub(super) struct Job {
     /// When the job last entered the queue, for the queue-wait histogram.
     pub(super) queued_at: Instant,
     /// First submit time, kept across requeues: the developer's wait.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) enqueued_at: SystemTime,
 }
 

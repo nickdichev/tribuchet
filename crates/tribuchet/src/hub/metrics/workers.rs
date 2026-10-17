@@ -31,15 +31,15 @@ pub(super) fn render_workers_json(state: &HubState) -> String {
     serde_json::to_string_pretty(&workers).unwrap_or_default() + "\n"
 }
 
-/// Whether the request line asks for the worker list. Anything else
-/// gets the metrics.
-pub(super) fn wants_workers(request: &[u8]) -> bool {
+/// Whether the request line is a GET of `path`. Anything else gets the
+/// metrics.
+pub(super) fn wants_path(request: &[u8], path: &[u8]) -> bool {
     let line = request.split(|b| *b == b'\r').next().unwrap_or_default();
     let mut parts = line.split(|b| *b == b' ');
     parts.next() == Some(b"GET")
         && parts
             .next()
-            .is_some_and(|p| p == b"/workers" || p.starts_with(b"/workers?"))
+            .is_some_and(|p| p == path || p.strip_prefix(path).is_some_and(|q| q.starts_with(b"?")))
 }
 
 #[cfg(test)]
@@ -50,13 +50,17 @@ mod tests {
     use crate::hub::state::{Worker, WorkerCaps};
 
     #[test]
-    fn only_a_get_of_workers_lists_the_workers() {
-        assert!(wants_workers(b"GET /workers HTTP/1.1\r\nHost: x\r\n\r\n"));
-        assert!(wants_workers(b"GET /workers?pretty HTTP/1.1\r\n\r\n"));
-        assert!(!wants_workers(b"GET /metrics HTTP/1.1\r\n\r\n"));
-        assert!(!wants_workers(b"GET /workersx HTTP/1.1\r\n\r\n"));
-        assert!(!wants_workers(b"POST /workers HTTP/1.1\r\n\r\n"));
-        assert!(!wants_workers(b""));
+    fn only_a_get_of_the_path_matches() {
+        let w = |r: &[u8]| wants_path(r, b"/workers");
+        assert!(w(b"GET /workers HTTP/1.1\r\nHost: x\r\n\r\n"));
+        assert!(w(b"GET /workers?pretty HTTP/1.1\r\n\r\n"));
+        assert!(!w(b"GET /metrics HTTP/1.1\r\n\r\n"));
+        assert!(!w(b"GET /workersx HTTP/1.1\r\n\r\n"));
+        assert!(!w(b"POST /workers HTTP/1.1\r\n\r\n"));
+        assert!(!w(b""));
+        assert!(wants_path(b"GET /status HTTP/1.1\r\n\r\n", b"/status"));
+        assert!(!wants_path(b"GET /workers HTTP/1.1\r\n\r\n", b"/status"));
+        assert!(!wants_path(b"\xff\x00garbage", b"/status"));
     }
 
     #[test]

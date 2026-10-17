@@ -230,6 +230,27 @@ Set `metrics-listen = "127.0.0.1:7438"` in `hub.toml` and the hub serves
 JSON, sorted by name, with `name`, `systems` and their features, `max_jobs`
 and `connected_seconds`.
 
+`GET /status` returns a JSON snapshot of the scheduler for dashboards.
+Times are Unix seconds:
+
+- `generated_at`, and `queue_depth`, the number of queued builds.
+- `workers`: connected workers sorted by name, with `name`, `systems`,
+  `max_jobs`, `free_slots` (the capacity the worker last declared, less
+  builds dispatched since), `connected_at` and `last_heartbeat_at` (null
+  before the first heartbeat).
+- `assignments`: running builds with `job_id`, `worker`, `system`, the
+  derivation `name`, `outputs` (output name to store path) and
+  `started_at`.
+- `queued`: waiting builds in queue order, with `job_id`, `system`,
+  `name`, `outputs` and `enqueued_at`, the first submission time, kept
+  when a build is requeued.
+- `departed`: workers whose session ended within the reconnect grace
+  period, with `name`, `systems` and `departed_at`.
+
+Strings are truncated to 256 bytes. Neither endpoint is authenticated and
+`/status` names the derivations being built, so keep `metrics-listen` on
+loopback or a network only trusted hosts reach.
+
 ## Fixed-output network policy
 
 On Linux workers with `/dev/net/tun`, fixed-output builds run in a

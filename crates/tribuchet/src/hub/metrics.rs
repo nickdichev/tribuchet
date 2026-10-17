@@ -12,13 +12,14 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::state::HubState;
+use super::status::render_status_json;
 use crate::errors::{Result, err_ctx};
 use crate::proto::BuildUsage;
 
 mod histogram;
 mod workers;
 use histogram::{BYTES, SECONDS, Series, bytes_f64, observe, render_histogram};
-use workers::{render_workers_json, wants_workers};
+use workers::{render_workers_json, wants_path};
 
 /// Monotonic build lifecycle counters. Gauges (queue depth, connected
 /// workers) are read straight from the live state at scrape time.
@@ -342,6 +343,11 @@ pub(super) async fn serve(state: Arc<HubState>, addr: String) -> Result<()> {
         .await
         .map_err(err_ctx(format!("binding metrics-listen address {addr}")))?;
     tracing::info!(%addr, "metrics endpoint listening");
+    serve_on(state, listener).await;
+    Ok(())
+}
+
+async fn serve_on(state: Arc<HubState>, listener: tokio::net::TcpListener) {
     loop {
         let (mut sock, _) = match listener.accept().await {
             Ok(pair) => pair,
@@ -352,11 +358,14 @@ pub(super) async fn serve(state: Arc<HubState>, addr: String) -> Result<()> {
         };
         let state = state.clone();
         tokio::spawn(async move {
-            // Only /workers is special. Any other path scrapes the metrics.
+            // Only /workers and /status are special. Any other path,
+            // or an unparseable request, scrapes the metrics.
             let mut buf = [0u8; 1024];
             let n = sock.read(&mut buf).await.unwrap_or(0);
-            let (kind, body) = if wants_workers(&buf[..n]) {
+            let (kind, body) = if wants_path(&buf[..n], b"/workers") {
                 ("application/json", render_workers_json(&state))
+            } else if wants_path(&buf[..n], b"/status") {
+                ("application/json", render_status_json(&state).await)
             } else {
                 ("text/plain; version=0.0.4", render(&state).await)
             };
@@ -379,6 +388,38 @@ mod tests {
     use super::*;
     use crate::hub::state::{Job, Replay, Worker, WorkerCaps};
     use crate::proto::BuildRequest;
+
+    /// One request to `serve_on` over loopback: (content type, body).
+    async fn get(addr: SocketAddr, request: &[u8]) -> (String, String) {
+        let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        sock.write_all(request).await.unwrap();
+        let mut resp = String::new();
+        sock.read_to_string(&mut resp).await.unwrap();
+        let (head, body) = resp.split_once("\r\n\r\n").unwrap();
+        let kind = head.lines().find_map(|l| l.strip_prefix("Content-Type: "));
+        (kind.unwrap().to_owned(), body.to_owned())
+    }
+
+    #[tokio::test]
+    async fn status_is_json_and_every_other_request_is_metrics() {
+        let state = Arc::new(HubState::for_test(Duration::ZERO));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(state, listener));
+        let (kind, body) = get(addr, b"GET /status HTTP/1.1\r\n\r\n").await;
+        assert_eq!(kind, "application/json");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["queue_depth"], 0);
+        for req in [
+            &b"GET /metrics HTTP/1.1\r\n\r\n"[..],
+            b"GET / HTTP/1.1\r\n\r\n",
+            b"\xff\x00 /status",
+        ] {
+            let (kind, body) = get(addr, req).await;
+            assert_eq!(kind, "text/plain; version=0.0.4");
+            assert!(body.contains("tribuchet_workers_connected 0"), "{body}");
+        }
+    }
 
     #[test]
     fn worker_messages_are_counted_by_variant() {

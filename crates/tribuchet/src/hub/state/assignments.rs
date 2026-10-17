@@ -7,10 +7,7 @@ use std::time::SystemTime;
 use super::{HubState, Job};
 
 /// A dispatched job and the worker running it.
-// Read only by tests until a status reader lands.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::hub) struct Assignment {
-    pub(in crate::hub) worker_id: u64,
     pub(in crate::hub) worker: String,
     pub(in crate::hub) system: String,
     /// The derivation's `name`, empty when the request carries none.
@@ -28,14 +25,8 @@ pub(in crate::hub) struct Assigned {
 
 impl HubState {
     /// Record that `worker` now runs `job`.
-    pub(in crate::hub) fn assign(
-        self: &Arc<Self>,
-        job: &Job,
-        worker_id: u64,
-        worker: &str,
-    ) -> Assigned {
+    pub(in crate::hub) fn assign(self: &Arc<Self>, job: &Job, worker: &str) -> Assigned {
         let assignment = Assignment {
-            worker_id,
             worker: worker.to_owned(),
             system: job.req.system.clone(),
             name: job.req.env.get("name").cloned().unwrap_or_default(),
@@ -86,12 +77,12 @@ mod tests {
         let state = Arc::new(HubState::for_test(Duration::ZERO));
         let job = job();
         let before = SystemTime::now();
-        let assigned = state.assign(&job, 7, "w7");
+        let assigned = state.assign(&job, "w7");
         {
             let all = state.assignments.lock().unwrap();
             assert_eq!(all.len(), 1);
             let a = &all["j1"];
-            assert_eq!((a.worker_id, a.worker.as_str()), (7, "w7"));
+            assert_eq!(a.worker, "w7");
             assert_eq!(a.system, "x86_64-linux");
             assert_eq!(a.name, "hello-2.12");
             assert_eq!(a.outputs, job.req.outputs);
@@ -106,7 +97,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel(1);
         drop(out_rx);
         let (_in_tx, in_rx) = mpsc::channel(1);
-        let assigned = state.assign(&job, 1, "w1");
+        let assigned = state.assign(&job, "w1");
         let sess = Arc::new(WorkerSession::new());
         supervise_job(
             state.clone(),

@@ -31,6 +31,7 @@ mod metrics;
 mod relay;
 mod serve;
 mod state;
+mod status;
 mod submit;
 pub use serve::run;
 
@@ -334,7 +335,7 @@ async fn worker_loop(
         state
             .metrics
             .observe_queue(&job.req.system, job.queued_at.elapsed());
-        let assigned = state.assign(&job, worker_id, &register.worker_name);
+        let assigned = state.assign(&job, &register.worker_name);
         let in_rx = router.register(&job.id);
         tokio::spawn(supervise_job(
             state.clone(),

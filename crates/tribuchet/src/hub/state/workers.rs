@@ -11,9 +11,6 @@ pub(in crate::hub) struct Worker {
     pub(in crate::hub) caps: WorkerCaps,
     /// Wall-clock registration time; `caps.connected_at` cannot be
     /// reported as an absolute time.
-    // The wall-clock fields are read only by tests until a status
-    // reader lands.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::hub) connected_wall: SystemTime,
     /// Shared with the worker's session, which updates it.
     pub(in crate::hub) live: Arc<Liveness>,
@@ -43,7 +40,6 @@ impl Liveness {
     }
 
     /// None until the worker's first heartbeat.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::hub) fn last_heartbeat(&self) -> Option<SystemTime> {
         *self.last_heartbeat.lock().unwrap()
     }
@@ -54,7 +50,6 @@ pub(in crate::hub) struct Departed {
     pub(in crate::hub) caps: WorkerCaps,
     pub(in crate::hub) at: Instant,
     /// Wall-clock departure time, for status reporting.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::hub) at_wall: SystemTime,
 }
 
