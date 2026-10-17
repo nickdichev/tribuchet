@@ -24,9 +24,12 @@ use crate::proto::{AttachEvent, BuildRequest, attach_event};
 mod inflight;
 #[path = "state/replay.rs"]
 mod replay;
+#[path = "state/workers.rs"]
+mod workers;
 
 pub(super) use inflight::{Inflight, Listing};
 pub(super) use replay::Replay;
+pub(super) use workers::{Departed, Liveness, Worker};
 
 type EventTx = mpsc::Sender<Result<AttachEvent, Status>>;
 
@@ -82,7 +85,7 @@ pub(super) struct HubState {
     /// Connected workers' capabilities, keyed by a per-connection id;
     /// submissions no worker can serve fail fast instead of queueing
     /// forever.
-    pub(super) worker_caps: StdMutex<HashMap<u64, WorkerCaps>>,
+    pub(super) worker_caps: StdMutex<HashMap<u64, Worker>>,
     pub(super) next_worker_id: atomic::AtomicU64,
     /// How long a build waits for a platform expected back (hub
     /// restart, worker reconnect). Never-seen platforms decline at once.
@@ -91,7 +94,7 @@ pub(super) struct HubState {
     /// ended: together they tell `expected_deadline` which platforms are
     /// still worth waiting for after a restart or a worker drop.
     pub(super) started_at: Instant,
-    pub(super) departed: StdMutex<Vec<(WorkerCaps, Instant)>>,
+    pub(super) departed: StdMutex<Vec<Departed>>,
     /// worker id -> dedupe keys it can resume
     pub(super) held: StdMutex<HashMap<u64, HashSet<String>>>,
     /// Woken when worker capabilities change so waiting submissions
@@ -121,9 +124,12 @@ pub(super) struct WorkerCaps {
 /// every served system, and max-jobs at the oversubscribed, capped
 /// aggregate capacity. max-jobs is omitted with no workers, leaving the
 /// base nix.conf default to govern local fallback builds.
-fn render_nix_config(caps: &HashMap<u64, WorkerCaps>, cfg: &NixConfig) -> String {
+fn render_nix_config<'a>(
+    caps: impl Iterator<Item = &'a WorkerCaps> + Clone,
+    cfg: &NixConfig,
+) -> String {
     let systems: BTreeSet<&str> = caps
-        .values()
+        .clone()
         .flat_map(|c| c.systems.keys().map(String::as_str))
         .collect();
     // System names are peer-supplied; Rust Debug is not valid JSON.
@@ -133,7 +139,7 @@ fn render_nix_config(caps: &HashMap<u64, WorkerCaps>, cfg: &NixConfig) -> String
         "args": [],
     }]);
     let mut out = format!("external-builders = {builders}\n");
-    let capacity: u64 = caps.values().map(|c| u64::from(c.max_jobs)).sum();
+    let capacity: u64 = caps.map(|c| u64::from(c.max_jobs)).sum();
     if capacity > 0 {
         let scaled = capacity * u64::from(cfg.oversubscribe_percent) / 100;
         let jobs = scaled.clamp(1, u64::from(cfg.max_jobs_cap));
@@ -199,8 +205,8 @@ impl HubState {
         };
         // Render and write under the lock so concurrent register/
         // deregister serialize and never leave stale content behind.
-        let caps = self.worker_caps.lock().unwrap();
-        let content = render_nix_config(&caps, cfg);
+        let workers = self.worker_caps.lock().unwrap();
+        let content = render_nix_config(workers.values().map(|w| &w.caps), cfg);
         // Skip the write, and the daemon restart the watching path unit
         // would trigger, when nothing changed (e.g. a worker reconnects
         // with the same capabilities).
@@ -218,19 +224,6 @@ impl HubState {
 }
 
 impl HubState {
-    /// Remember a departed worker's capabilities so a build for the
-    /// platform it served waits for it to reconnect rather than
-    /// declining at once.
-    pub(super) fn record_departed(&self, caps: WorkerCaps) {
-        let now = Instant::now();
-        let mut departed = self.departed.lock().unwrap();
-        // Prune here: expected_deadline() only runs for unservable
-        // submissions, so a healthy fleet would otherwise accumulate
-        // an entry per worker reconnect indefinitely.
-        departed.retain(|(_, at)| now < *at + self.worker_grace);
-        departed.push((caps, now));
-    }
-
     /// Whether a platform can be built now, once an expected worker is
     /// back, or never.
     pub(super) fn servability(&self, system: &str, features: &[String]) -> Servability {
@@ -239,7 +232,7 @@ impl HubState {
             .lock()
             .unwrap()
             .values()
-            .any(|c| c.serves(system, features))
+            .any(|w| w.caps.serves(system, features))
         {
             return Servability::Now;
         }
@@ -256,12 +249,10 @@ impl HubState {
         if now < startup {
             return Some(startup);
         }
-        let mut departed = self.departed.lock().unwrap();
-        departed.retain(|(_, at)| now < *at + self.worker_grace);
-        departed
+        self.departed_within_grace()
             .iter()
-            .filter(|(c, _)| c.serves(system, features))
-            .map(|(_, at)| *at + self.worker_grace)
+            .filter(|d| d.caps.serves(system, features))
+            .map(|d| d.at + self.worker_grace)
             .max()
     }
 
@@ -519,7 +510,7 @@ mod tests {
             c.max_jobs = 50;
             c
         });
-        let out = render_nix_config(&workers, &cfg);
+        let out = render_nix_config(workers.values(), &cfg);
         assert!(
             out.contains(r#""systems":["aarch64-linux","x86_64-linux"]"#),
             "{out}"
@@ -539,7 +530,7 @@ mod tests {
         };
         let mut workers = HashMap::new();
         workers.insert(1, caps("x86_64-linux\u{2028}\"", &[]));
-        let out = render_nix_config(&workers, &cfg);
+        let out = render_nix_config(workers.values(), &cfg);
         let json = out
             .strip_prefix("external-builders = ")
             .and_then(|s| s.lines().next())
@@ -559,7 +550,7 @@ mod tests {
             oversubscribe_percent: 200,
             max_jobs_cap: 256,
         };
-        let out = render_nix_config(&HashMap::new(), &cfg);
+        let out = render_nix_config([].iter(), &cfg);
         assert!(out.contains(r#""systems":[]"#), "{out}");
         // No worker -> leave max-jobs to the base nix.conf default so a
         // local fallback build is not run at the offload capacity.

@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,7 +37,7 @@ pub use serve::run;
 use crate::errors::{Result, chain};
 use metrics::Metrics;
 use relay::{WorkerSession, run_job, send};
-use state::{HubState, Job, WorkerCaps};
+use state::{HubState, Job, Liveness, Worker, WorkerCaps};
 
 /// No worker message for this long tears the session down and fails
 /// its builds: heartbeats flow every 30s, so silence means a dead
@@ -69,16 +69,24 @@ struct CapsGuard {
     state: Arc<HubState>,
     id: u64,
     caps: WorkerCaps,
+    live: Arc<Liveness>,
 }
 
 impl CapsGuard {
     fn new(state: Arc<HubState>, caps: WorkerCaps) -> Self {
         let id = state.next_worker_id.fetch_add(1, Ordering::Relaxed);
-        state.worker_caps.lock().unwrap().insert(id, caps.clone());
+        let worker = Worker::new(caps.clone());
+        let live = worker.live.clone();
+        state.worker_caps.lock().unwrap().insert(id, worker);
         // Wake submissions waiting for a capable worker to appear.
         state.caps_changed.notify_waiters();
         state.regen_nix_config();
-        Self { state, id, caps }
+        Self {
+            state,
+            id,
+            caps,
+            live,
+        }
     }
 }
 
@@ -141,7 +149,7 @@ fn msg_build_id(msg: &worker_message::Msg) -> Option<&str> {
 async fn route_loop(
     mut in_rx: mpsc::Receiver<WorkerMessage>,
     router: Router,
-    capacity: Arc<AtomicU32>,
+    live: Arc<Liveness>,
     state: Arc<HubState>,
     worker: u64,
 ) {
@@ -162,11 +170,12 @@ async fn route_loop(
             .metrics
             .count_msg(relay::msg_name(&m), m.encoded_len());
         if let worker_message::Msg::RequestJob(r) = &m {
-            capacity.store(r.capacity, Ordering::SeqCst);
+            live.free_slots.store(r.capacity, Ordering::SeqCst);
             state.notify.notify_waiters();
             continue;
         }
         if let worker_message::Msg::Heartbeat(h) = &m {
+            live.heartbeat();
             let keys: HashSet<String> = h.resumable_keys.iter().cloned().collect();
             state.held.lock().unwrap().insert(worker, keys);
         }
@@ -278,13 +287,11 @@ async fn worker_loop(
         .lock()
         .unwrap()
         .insert(worker_id, register.resumable_keys.iter().cloned().collect());
-    // The worker's last declared free capacity, decremented per
-    // dispatch until its next declaration replaces it.
-    let capacity = Arc::new(AtomicU32::new(0));
+    let live = caps_guard.live.clone();
     let mut route = tokio::spawn(route_loop(
         in_rx,
         router.clone(),
-        capacity.clone(),
+        live.clone(),
         state.clone(),
         worker_id,
     ));
@@ -299,10 +306,10 @@ async fn worker_loop(
             if let Some(job) = state.take_job_by_key(worker_id).await {
                 break job;
             }
-            if capacity.load(Ordering::SeqCst) > 0
+            if live.free_slots.load(Ordering::SeqCst) > 0
                 && let Some(job) = state.take_job(&caps, worker_id).await
             {
-                capacity.fetch_sub(1, Ordering::SeqCst);
+                live.free_slots.fetch_sub(1, Ordering::SeqCst);
                 break job;
             }
             // notify_waiters() wakes only current waiters; the timeout

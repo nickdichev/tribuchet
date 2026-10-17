@@ -263,7 +263,7 @@ async fn render(state: &HubState) -> String {
 /// `slots - running`.
 fn render_systems(out: &mut String, state: &HubState, queued: &BTreeMap<String, u64>) {
     let mut slots: BTreeMap<String, u64> = BTreeMap::new();
-    for c in state.worker_caps.lock().unwrap().values() {
+    for c in state.worker_caps.lock().unwrap().values().map(|w| &w.caps) {
         for system in c.systems.keys() {
             *slots.entry(system.clone()).or_default() += u64::from(c.max_jobs);
         }
@@ -302,7 +302,7 @@ fn render_systems(out: &mut String, state: &HubState, queued: &BTreeMap<String, 
 fn render_workers(out: &mut String, state: &HubState) {
     let mut per_system: BTreeMap<String, u64> = BTreeMap::new();
     let caps = state.worker_caps.lock().unwrap();
-    for c in caps.values() {
+    for c in caps.values().map(|w| &w.caps) {
         for system in c.systems.keys() {
             *per_system.entry(system.clone()).or_default() += 1;
         }
@@ -377,7 +377,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::hub::state::{Job, Replay, WorkerCaps};
+    use crate::hub::state::{Job, Replay, Worker, WorkerCaps};
     use crate::proto::BuildRequest;
 
     #[test]
@@ -473,12 +473,12 @@ mod tests {
         for (id, max_jobs) in [(1, 4), (2, 8)] {
             state.worker_caps.lock().unwrap().insert(
                 id,
-                WorkerCaps {
+                Worker::new(WorkerCaps {
                     name: format!("w{id}"),
                     connected_at: Instant::now(),
                     systems: [("x86_64-linux".to_owned(), HashSet::default())].into(),
                     max_jobs,
-                },
+                }),
             );
         }
         let out = render(&state).await;

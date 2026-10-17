@@ -12,7 +12,8 @@ pub(super) fn render_workers_json(state: &HubState) -> String {
         .lock()
         .unwrap()
         .values()
-        .map(|c| {
+        .map(|w| {
+            let c = &w.caps;
             let systems: BTreeMap<_, _> = c
                 .systems
                 .iter()
@@ -46,7 +47,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::hub::state::WorkerCaps;
+    use crate::hub::state::{Worker, WorkerCaps};
 
     #[test]
     fn only_a_get_of_workers_lists_the_workers() {
@@ -67,7 +68,7 @@ mod tests {
         ] {
             state.worker_caps.lock().unwrap().insert(
                 id,
-                WorkerCaps {
+                Worker::new(WorkerCaps {
                     name: name.into(),
                     connected_at: Instant::now(),
                     systems: [(
@@ -76,7 +77,7 @@ mod tests {
                     )]
                     .into(),
                     max_jobs,
-                },
+                }),
             );
         }
         let v: serde_json::Value = serde_json::from_str(&render_workers_json(&state)).unwrap();
