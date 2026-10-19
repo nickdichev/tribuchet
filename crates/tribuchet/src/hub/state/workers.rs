@@ -1,6 +1,7 @@
 //! Connected workers' liveness and capacity, and recently departed ones.
 
-use std::sync::atomic::AtomicU32;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime};
 
@@ -68,6 +69,35 @@ impl HubState {
         });
     }
 
+    /// Preferred workers other than `worker` with a free slot, whose
+    /// builds `worker` leaves alone; empty when `worker` is preferred.
+    /// Slots count the hub's own assignments: a worker's declared
+    /// capacity includes a lookahead build, which would park work
+    /// behind a full worker while others sit idle.
+    pub(in crate::hub) fn preferred_with_room(&self, worker: u64) -> Vec<WorkerCaps> {
+        if self.preferred_workers.is_empty() {
+            return Vec::new();
+        }
+        let mut running: HashMap<String, usize> = HashMap::new();
+        for a in self.assignments.lock().unwrap().values() {
+            *running.entry(a.worker.clone()).or_default() += 1;
+        }
+        let workers = self.worker_caps.lock().unwrap();
+        let preferred = |w: &Worker| self.preferred_workers.contains(&w.caps.name);
+        if workers.get(&worker).is_some_and(preferred) {
+            return Vec::new();
+        }
+        workers
+            .iter()
+            .filter(|&(id, w)| *id != worker && preferred(w))
+            .filter(|(_, w)| w.live.free_slots.load(Ordering::SeqCst) > 0)
+            .filter(|(_, w)| {
+                running.get(&w.caps.name).copied().unwrap_or(0) < w.caps.max_jobs as usize
+            })
+            .map(|(_, w)| w.caps.clone())
+            .collect()
+    }
+
     /// The departed list with entries older than `worker_grace` pruned.
     pub(in crate::hub) fn departed_within_grace(&self) -> MutexGuard<'_, Vec<Departed>> {
         let now = Instant::now();
@@ -85,6 +115,8 @@ mod tests {
 
     use std::sync::atomic::Ordering;
 
+    use super::super::Replay;
+    use super::super::tests::queued;
     use super::*;
     use crate::hub::{CapsGuard, Router, route_loop};
     use crate::proto::{Heartbeat, RequestJob, WorkerMessage, worker_message};
@@ -143,6 +175,34 @@ mod tests {
         assert!(first >= before);
         route(&state, guard.id, vec![request_job(2)]).await;
         assert_eq!(live(&state, guard.id).last_heartbeat(), Some(first));
+    }
+
+    fn named(name: &str, max_jobs: u32) -> WorkerCaps {
+        WorkerCaps {
+            name: name.into(),
+            max_jobs,
+            ..caps()
+        }
+    }
+
+    #[tokio::test]
+    async fn other_workers_wait_until_preferred_workers_are_full() {
+        let mut state = HubState::for_test(Duration::ZERO);
+        state.preferred_workers = vec!["static".into()];
+        let state = Arc::new(state);
+        let fixed = CapsGuard::new(state.clone(), named("static", 1));
+        let burst = CapsGuard::new(state.clone(), named("burst", 4));
+        live(&state, fixed.id).free_slots.store(2, Ordering::SeqCst);
+        let replay = Arc::new(Replay::default());
+        let _rx = replay.subscribe().await;
+        let job = queued("x86_64-linux", replay);
+        state.queue.lock().await.push_back(job);
+        assert!(state.take_job(&named("burst", 4), burst.id).await.is_none());
+        let job = state.take_job(&named("static", 1), fixed.id).await.unwrap();
+        // Full by its assignments, despite the declared lookahead slot.
+        let _assigned = state.assign(&job, "static");
+        state.queue.lock().await.push_back(job);
+        assert!(state.take_job(&named("burst", 4), burst.id).await.is_some());
     }
 
     #[test]

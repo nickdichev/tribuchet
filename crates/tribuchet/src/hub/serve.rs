@@ -139,11 +139,13 @@ async fn run_async(cfg: HubConfig) -> Result<()> {
     let config_dir = cfg.config_dir.as_path();
     let chunks = open_chunk_cache(&cfg)?;
 
-    let state = Arc::new(HubState::new(
+    let mut state = HubState::new(
         Duration::from_secs(cfg.worker_grace_secs),
         cfg.nix_config.clone(),
         chunks,
-    ));
+    );
+    state.preferred_workers = cfg.preferred_workers.clone();
+    let state = Arc::new(state);
 
     let (tls, peer_auth) = configure_auth(&cfg, config_dir)?;
 

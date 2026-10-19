@@ -113,6 +113,8 @@ pub(super) struct HubState {
     /// fragment on every register/deregister.
     pub(super) nix_config: Option<NixConfig>,
     pub(super) chunks: Arc<ChunkCache>,
+    /// Worker names served first; see `HubConfig::preferred_workers`.
+    pub(super) preferred_workers: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -202,6 +204,7 @@ impl HubState {
             metrics: Metrics::default(),
             nix_config,
             chunks,
+            preferred_workers: Vec::new(),
         }
     }
 
@@ -265,6 +268,7 @@ impl HubState {
     }
 
     pub(super) async fn take_job(&self, caps: &WorkerCaps, worker: u64) -> Option<Job> {
+        let ahead = self.preferred_with_room(worker);
         loop {
             let job = {
                 let mut queue = self.queue.lock().await;
@@ -273,9 +277,11 @@ impl HubState {
                     held.iter()
                         .any(|(id, keys)| *id != worker && keys.contains(key))
                 };
-                let pos = queue
-                    .iter()
-                    .position(|j| caps.serves(&j.req.system, &j.features) && !elsewhere(&j.key))?;
+                let pos = queue.iter().position(|j| {
+                    caps.serves(&j.req.system, &j.features)
+                        && !elsewhere(&j.key)
+                        && !ahead.iter().any(|c| c.serves(&j.req.system, &j.features))
+                })?;
                 queue.remove(pos)?
             };
             // Abandoned while queued (every attach client gone): drop it

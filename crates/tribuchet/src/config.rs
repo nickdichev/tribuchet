@@ -99,6 +99,11 @@ pub struct HubConfig {
     /// Cache directory override. Defaults to XDG_CACHE_HOME/tribuchet.
     #[serde(default)]
     pub chunk_cache_dir: Option<PathBuf>,
+    /// Worker names that get first claim on queued builds. Other
+    /// workers take a build only while every preferred worker that
+    /// serves it is full, so on-demand workers can drain and stop.
+    #[serde(default)]
+    pub preferred_workers: Vec<String>,
 }
 
 fn default_chunk_cache_bytes() -> u64 {

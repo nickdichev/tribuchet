@@ -203,6 +203,14 @@ Compared to the NixOS module the agents get no delegated cgroup, so
 volume is only a cache. The daemon garbage-collects it via the
 `min-free` and `max-free` settings baked into the image.
 
+## Preferred workers
+
+List worker names in `preferred-workers` in `hub.toml` to give them
+first claim on queued builds. Other workers take a build only while every
+preferred worker that serves it is full, counting the builds the hub has
+assigned. Use it to keep on-demand workers idle, so they can shut down,
+while always-on workers have room.
+
 ## Prometheus metrics
 
 Set `metrics-listen = "127.0.0.1:7438"` in `hub.toml` and the hub serves
