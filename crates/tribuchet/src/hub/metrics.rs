@@ -2,7 +2,7 @@
 //! endpoint. Kept dependency-free (raw tokio TCP) since the hub already
 //! pulls in plenty and a scrape endpoint needs no routing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,7 +261,7 @@ async fn render(state: &HubState) -> String {
 
 /// Queue, running builds and capacity per system, for autoscaling. A worker
 /// serving several systems counts its slots in each. Free slots are
-/// `slots - running`.
+/// `slots - running`. Every known system gets both states, at 0 when idle.
 fn render_systems(out: &mut String, state: &HubState, queued: &BTreeMap<String, u64>) {
     let mut slots: BTreeMap<String, u64> = BTreeMap::new();
     for c in state.worker_caps.lock().unwrap().values().map(|w| &w.caps) {
@@ -275,8 +275,11 @@ fn render_systems(out: &mut String, state: &HubState, queued: &BTreeMap<String, 
         "# HELP tribuchet_system_builds Builds queued or running, by system."
     );
     let _ = writeln!(out, "# TYPE tribuchet_system_builds gauge");
+    let mut systems: BTreeSet<&String> = slots.keys().collect();
+    systems.extend(queued.keys().chain(running.keys()));
     for (kind, counts) in [("queued", queued), ("running", &running)] {
-        for (system, n) in counts {
+        for system in &systems {
+            let n = counts.get(*system).copied().unwrap_or(0);
             let _ = writeln!(
                 out,
                 "tribuchet_system_builds{{system=\"{}\",state=\"{kind}\"}} {n}",
@@ -518,7 +521,11 @@ mod tests {
                 Worker::new(WorkerCaps {
                     name: format!("w{id}"),
                     connected_at: Instant::now(),
-                    systems: [("x86_64-linux".to_owned(), HashSet::default())].into(),
+                    systems: [
+                        ("x86_64-linux".to_owned(), HashSet::default()),
+                        ("riscv64-linux".to_owned(), HashSet::default()),
+                    ]
+                    .into(),
                     max_jobs,
                 }),
             );
@@ -535,6 +542,15 @@ mod tests {
         );
         assert!(
             has("tribuchet_system_builds{system=\"x86_64-linux\",state=\"running\"} 1"),
+            "{out}"
+        );
+        assert!(
+            has("tribuchet_system_builds{system=\"aarch64-linux\",state=\"running\"} 0"),
+            "{out}"
+        );
+        // An idle system with connected workers still reports an empty queue.
+        assert!(
+            has("tribuchet_system_builds{system=\"riscv64-linux\",state=\"queued\"} 0"),
             "{out}"
         );
         assert!(
