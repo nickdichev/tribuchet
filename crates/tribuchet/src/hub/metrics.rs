@@ -301,15 +301,21 @@ fn render_systems(out: &mut String, state: &HubState, queued: &BTreeMap<String, 
     }
 }
 
-/// Connected workers, in total and per system. Per-worker detail is on
-/// `/workers`, which keeps the series count independent of worker churn.
+/// Connected workers, in total, per system and by whether they are in
+/// `preferred_workers`. Per-worker detail is on `/workers`, which keeps the
+/// series count independent of worker churn.
 fn render_workers(out: &mut String, state: &HubState) {
     let mut per_system: BTreeMap<String, u64> = BTreeMap::new();
+    // (workers, slots), indexed by `preferred as usize`.
+    let mut class = [(0u64, 0u64); 2];
     let caps = state.worker_caps.lock().unwrap();
     for c in caps.values().map(|w| &w.caps) {
         for system in c.systems.keys() {
             *per_system.entry(system.clone()).or_default() += 1;
         }
+        let entry = &mut class[usize::from(state.preferred_workers.contains(&c.name))];
+        entry.0 += 1;
+        entry.1 += u64::from(c.max_jobs);
     }
     let connected = caps.len() as u64;
     drop(caps);
@@ -332,6 +338,25 @@ fn render_workers(out: &mut String, state: &HubState) {
             "tribuchet_workers_for_system{{system=\"{}\"}} {count}",
             label(system)
         );
+    }
+    for (name, help, pick) in [
+        (
+            "tribuchet_workers",
+            "Connected workers, by whether they are preferred workers.",
+            (|c: (u64, u64)| c.0) as fn((u64, u64)) -> u64,
+        ),
+        (
+            "tribuchet_worker_slots",
+            "Build slots of connected workers, by whether they are preferred workers.",
+            |c| c.1,
+        ),
+    ] {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        for preferred in [true, false] {
+            let n = pick(class[usize::from(preferred)]);
+            let _ = writeln!(out, "{name}{{preferred=\"{preferred}\"}} {n}");
+        }
     }
 }
 
@@ -555,6 +580,99 @@ mod tests {
         );
         assert!(
             has("tribuchet_system_slots{system=\"x86_64-linux\"} 12"),
+            "{out}"
+        );
+    }
+
+    fn connect(state: &HubState, id: u64, name: &str, max_jobs: u32) {
+        state.worker_caps.lock().unwrap().insert(
+            id,
+            Worker::new(WorkerCaps {
+                name: name.into(),
+                connected_at: Instant::now(),
+                systems: [("x86_64-linux".to_owned(), HashSet::default())].into(),
+                max_jobs,
+            }),
+        );
+    }
+
+    /// The four preferred/other worker and slot lines, in a fixed order.
+    fn class_lines(out: &str) -> Vec<&str> {
+        let mut lines: Vec<&str> = out
+            .lines()
+            .filter(|l| {
+                l.starts_with("tribuchet_workers{") || l.starts_with("tribuchet_worker_slots{")
+            })
+            .collect();
+        lines.sort_unstable();
+        lines
+    }
+
+    #[tokio::test]
+    async fn worker_gauges_split_preferred_from_other_workers() {
+        let mut state = HubState::for_test(Duration::ZERO);
+        // "gone" is preferred but not connected, so it adds nothing.
+        state.preferred_workers = vec!["static-a".into(), "static-b".into(), "gone".into()];
+        connect(&state, 1, "static-a", 12);
+        connect(&state, 2, "static-b", 6);
+        connect(&state, 3, "burst-1", 5);
+        let out = render(&state).await;
+        assert_eq!(
+            class_lines(&out),
+            [
+                "tribuchet_worker_slots{preferred=\"false\"} 5",
+                "tribuchet_worker_slots{preferred=\"true\"} 18",
+                "tribuchet_workers{preferred=\"false\"} 1",
+                "tribuchet_workers{preferred=\"true\"} 2",
+            ],
+            "{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "tribuchet_workers_connected 3"),
+            "{out}"
+        );
+        assert!(
+            out.lines().any(|l| l == "# TYPE tribuchet_workers gauge"),
+            "{out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l == "# TYPE tribuchet_worker_slots gauge"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_gauges_report_zero_without_workers() {
+        let mut state = HubState::for_test(Duration::ZERO);
+        state.preferred_workers = vec!["static-a".into()];
+        let out = render(&state).await;
+        assert_eq!(
+            class_lines(&out),
+            [
+                "tribuchet_worker_slots{preferred=\"false\"} 0",
+                "tribuchet_worker_slots{preferred=\"true\"} 0",
+                "tribuchet_workers{preferred=\"false\"} 0",
+                "tribuchet_workers{preferred=\"true\"} 0",
+            ],
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_gauges_count_everyone_as_other_without_preferred_config() {
+        let state = HubState::for_test(Duration::ZERO);
+        connect(&state, 1, "static-a", 12);
+        connect(&state, 2, "burst-1", 5);
+        let out = render(&state).await;
+        assert_eq!(
+            class_lines(&out),
+            [
+                "tribuchet_worker_slots{preferred=\"false\"} 17",
+                "tribuchet_worker_slots{preferred=\"true\"} 0",
+                "tribuchet_workers{preferred=\"false\"} 2",
+                "tribuchet_workers{preferred=\"true\"} 0",
+            ],
             "{out}"
         );
     }
